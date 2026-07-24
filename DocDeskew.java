@@ -31,6 +31,10 @@ import java.util.Collections;
 import java.util.List;
 
 public class DocDeskew extends JFrame {
+    
+    // Application Version Constant
+    private static final String VERSION = "1.1";
+    
     private BufferedImage sourceImage;
     private ImagePanel sourceImagePanel;
     private JTabbedPane tabbedPane;
@@ -175,6 +179,7 @@ public class DocDeskew extends JFrame {
         String msg = "<html><body style='width: 300px; font-family: sans-serif; text-align: center;'>"
             + "<h2>DocDeskew</h2>"
             + "<p><i>Document Perspective Deskew Utility</i></p>"
+            + "<p><b>Version " + VERSION + "</b></p>"
             + "<hr>"
             + "<p>Created by <b>Gemini 3.1 Pro</b></p>"
             + "<p style='font-size: 10px; color: gray;'>Featuring Dual Engine Architecture</p>"
@@ -253,47 +258,75 @@ public class DocDeskew extends JFrame {
 
     private void autoDetectCorners() {
         selectedPoints.clear();
+        boolean foundValidDocument = false;
+
         if (isOpenCVAvailable && sourceImage != null) {
             try {
                 byte[] pixels = ((DataBufferByte) sourceImage.getRaster().getDataBuffer()).getData();
                 Mat srcMat = new Mat(sourceImage.getHeight(), sourceImage.getWidth(), CvType.CV_8UC3);
                 srcMat.put(0, 0, pixels);
 
+                // 1. Grayscale & Blur
                 Mat gray = new Mat();
                 Imgproc.cvtColor(srcMat, gray, Imgproc.COLOR_BGR2GRAY);
-                Imgproc.GaussianBlur(gray, gray, new Size(5, 5), 0);
+                // Increased blur slightly to smooth out text and internal document noise
+                Imgproc.GaussianBlur(gray, gray, new Size(7, 7), 0);
 
+                // 2. Edge Detection
                 Mat edges = new Mat();
                 Imgproc.Canny(gray, edges, 75, 200);
 
+                // 3. Dilation (Thickens edges to close any tiny gaps in the document's border)
+                Mat kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(3, 3));
+                Imgproc.dilate(edges, edges, kernel);
+
+                // 4. Find and Sort Contours
                 List<MatOfPoint> contours = new ArrayList<>();
                 Mat hierarchy = new Mat();
                 Imgproc.findContours(edges, contours, hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE);
 
+                // Sort descending: Largest contours first
                 contours.sort((c1, c2) -> Double.compare(Imgproc.contourArea(c2), Imgproc.contourArea(c1)));
 
+                double imgArea = sourceImage.getWidth() * sourceImage.getHeight();
+
+                // 5. Smart Filtering
                 for (MatOfPoint contour : contours) {
+                    double area = Imgproc.contourArea(contour);
+
+                    // Reject the outer bounds of the image itself (> 98%) 
+                    // and reject tiny noise/objects (< 5%)
+                    if (area < imgArea * 0.05 || area > imgArea * 0.98) {
+                        continue;
+                    }
+
                     MatOfPoint2f approx = new MatOfPoint2f();
                     MatOfPoint2f contour2f = new MatOfPoint2f(contour.toArray());
+                    
+                    // Calculate approximation accuracy
                     double epsilon = 0.02 * Imgproc.arcLength(contour2f, true);
                     Imgproc.approxPolyDP(contour2f, approx, epsilon, true);
 
+                    // If we found a 4-sided polygon that fits our size criteria, lock it in!
                     if (approx.toArray().length == 4) {
                         for (Point p : approx.toArray()) {
                             selectedPoints.add(new java.awt.Point((int) p.x, (int) p.y));
                         }
                         sortCorners(selectedPoints);
-                        break;
+                        foundValidDocument = true;
+                        break; 
                     }
                 }
-                srcMat.release(); gray.release(); edges.release(); hierarchy.release();
+                
+                // Clean up native memory
+                srcMat.release(); gray.release(); edges.release(); kernel.release(); hierarchy.release();
             } catch (Exception e) {
-                System.out.println("Auto-detect failed, falling back to defaults.");
+                System.out.println("Auto-detect failed due to an error, falling back to defaults.");
             }
         }
 
-        // Fallback or if OpenCV failed to find a quad
-        if (selectedPoints.size() != 4 && sourceImage != null) {
+        // Fallback: If OpenCV failed to find a valid document quad, use a 10% margin
+        if (!foundValidDocument && sourceImage != null) {
             selectedPoints.clear();
             int w = sourceImage.getWidth();
             int h = sourceImage.getHeight();
